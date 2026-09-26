@@ -30,7 +30,10 @@
 
       <div class="rules-head">
         <h2>规则</h2>
-        <button id="addRuleBtn" type="button" class="btn-secondary">+ 添加规则</button>
+        <div class="rules-actions">
+          <button id="simplifyBtn" type="button" class="btn-secondary">等价精简</button>
+          <button id="addRuleBtn" type="button" class="btn-secondary">+ 添加规则</button>
+        </div>
       </div>
       <div id="rulesList" class="rules-list"></div>
 
@@ -70,6 +73,17 @@
       </div>
     </section>
   </main>
+
+  <div id="simplifyOverlay" class="modal-overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="simplifyTitle">
+      <h2 id="simplifyTitle">等价精简结果</h2>
+      <div id="simplifyBody" class="modal-body"></div>
+      <div class="modal-actions">
+        <button id="simplifyCancelBtn" type="button" class="btn-secondary">取消</button>
+        <button id="simplifyApplyBtn" type="button">确认替换编辑区规则</button>
+      </div>
+    </div>
+  </div>
 
   <div id="toast" class="toast" hidden></div>
 

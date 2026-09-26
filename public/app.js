@@ -14,6 +14,11 @@ const exampleSelect = $('#exampleSelect');
 const loadExampleBtn = $('#loadExampleBtn');
 const previewHost = $('#previewHost');
 const toast = $('#toast');
+const simplifyBtn = $('#simplifyBtn');
+const simplifyOverlay = $('#simplifyOverlay');
+const simplifyBody = $('#simplifyBody');
+const simplifyCancelBtn = $('#simplifyCancelBtn');
+const simplifyApplyBtn = $('#simplifyApplyBtn');
 
 const shadow = previewHost.attachShadow({ mode: 'open' });
 let userRoot = null;
@@ -34,6 +39,7 @@ const state = {
 
 let computeSeq = 0;
 let analyzeSeq = 0;
+let pendingSimplify = null; // 弹窗打开期间暂存的精简结果；非空时屏蔽编辑请求
 
 /* ---------------- 工具 ---------------- */
 
@@ -221,11 +227,13 @@ function bindRuleEvents() {
       const field = input.dataset.field;
       const evt = input.tagName === 'SELECT' || input.type === 'checkbox' ? 'change' : 'input';
       input.addEventListener(evt, () => {
+        if (pendingSimplify) return; // 精简确认弹窗打开期间禁止编辑
         rule[field] = input.type === 'checkbox' ? input.checked : input.value;
         scheduleCompute();
       });
     });
     card.querySelector('[data-action="delete"]').addEventListener('click', () => {
+      if (pendingSimplify) return;
       state.rules = state.rules.filter((r) => r.uid !== uid);
       renderRules();
       renderRuleErrors([]);
@@ -263,6 +271,7 @@ function renderRuleErrors(ruleErrors) {
 }
 
 addRuleBtn.addEventListener('click', () => {
+  if (pendingSimplify) return;
   addRule();
   renderRules();
   rulesList.lastElementChild.querySelector('[data-field="selector"]').focus();
@@ -398,9 +407,114 @@ async function analyze() {
   renderAnalysis(data);
 }
 
+/* ---------------- 等价精简 ---------------- */
+
+function ruleIndexChips(indices) {
+  if (!indices.length) return '<span class="muted">无</span>';
+  return indices.map((i) => `<span class="rule-chip">${i + 1}</span>`).join('');
+}
+
+function layerChipsHtml(layerOrder) {
+  if (layerOrder?.length) {
+    return layerOrder.map((l) => `<span class="layer-chip">${escapeHtml(l)}</span>`).join(' → ');
+  }
+  return '<span class="muted">无命名层（保留规则均为无层声明）</span>';
+}
+
+function closeSimplify() {
+  pendingSimplify = null;
+  simplifyOverlay.hidden = true;
+}
+
+function renderSimplifyResult(data) {
+  const noRemoval = data.removed.length === 0;
+  simplifyApplyBtn.disabled = noRemoval;
+  simplifyBody.innerHTML = `
+    <div class="simplify-summary">
+      共 ${data.ruleCount} 条规则、${data.elementCount} 个元素；穷举 ${data.examinedCandidates} 个原序子序列，
+      每个候选均按剩余规则<strong>重新计算层名首次出现顺序</strong>并核对全树三个属性的胜出值（含无声明）。
+    </div>
+    <div class="simplify-group">
+      <div class="simplify-label keep">保留（${data.kept.length} 条，原规则序号）：</div>
+      <div class="simplify-chips">${ruleIndexChips(data.kept)}</div>
+    </div>
+    <div class="simplify-group">
+      <div class="simplify-label remove">删除（${data.removed.length} 条，原规则序号）：</div>
+      <div class="simplify-chips">${ruleIndexChips(data.removed)}</div>
+    </div>
+    <div class="simplify-group">
+      <div class="simplify-label">原层顺序：</div>
+      <div>${layerChipsHtml(data.originalLayerOrder)}</div>
+    </div>
+    <div class="simplify-group">
+      <div class="simplify-label">精简后新层顺序：</div>
+      <div>${layerChipsHtml(data.layerOrder)}</div>
+    </div>
+    <div class="simplify-note">${noRemoval
+      ? '当前规则集已无法进一步精简：每条规则都对某些元素某个属性的胜出结果（或层顺序）有贡献。'
+      : '确认后将按上述方案替换编辑区规则；在确认前不会改动任何输入。'}</div>
+  `;
+}
+
+async function simplify() {
+  let data;
+  try {
+    data = await postJson('/api/simplify', { html: state.html, rules: state.rules });
+  } catch (err) {
+    showToast(`等价精简失败：${err.message}`);
+    return;
+  }
+  if (!data.ok) {
+    const msgs = [
+      ...(data.limitErrors || []),
+      ...(data.htmlErrors || []),
+      ...(data.ruleErrors || []),
+      data.message,
+    ].filter(Boolean);
+    showToast(`无法等价精简：${msgs[0] || '输入有误'}`);
+    return;
+  }
+  // 打开确认弹窗；确认前对 HTML 与规则做快照，确认时核对未被改动
+  pendingSimplify = {
+    data,
+    html: state.html,
+    signature: JSON.stringify(state.rules.map(({ selector, property, value, layer, important }) =>
+      ({ selector, property, value, layer, important }))),
+  };
+  renderSimplifyResult(data);
+  simplifyOverlay.hidden = false;
+}
+
+simplifyBtn.addEventListener('click', () => { simplify(); });
+simplifyCancelBtn.addEventListener('click', closeSimplify);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !simplifyOverlay.hidden) closeSimplify();
+});
+simplifyOverlay.addEventListener('click', (e) => {
+  if (e.target === simplifyOverlay) closeSimplify();
+});
+simplifyApplyBtn.addEventListener('click', () => {
+  if (!pendingSimplify) return;
+  const { data, html, signature } = pendingSimplify;
+  const currentSignature = JSON.stringify(state.rules.map(({ selector, property, value, layer, important }) =>
+    ({ selector, property, value, layer, important })));
+  if (html !== state.html || signature !== currentSignature) {
+    closeSimplify();
+    showToast('编辑区内容已变化，未执行替换，请重新精简。');
+    return;
+  }
+  const kept = new Set(data.kept);
+  state.rules = state.rules.filter((_, i) => kept.has(i));
+  closeSimplify();
+  renderRules();
+  compute();
+  showToast(`已删除 ${data.removed.length} 条规则，全树胜出值保持不变。`);
+});
+
 /* ---------------- 示例 ---------------- */
 
 function loadExample(ex) {
+  if (pendingSimplify) return;
   state.html = ex.html || '';
   state.rules = (ex.rules || []).map((r) => ({
     uid: uidSeq++,
@@ -421,6 +535,10 @@ function loadExample(ex) {
 
 async function init() {
   htmlEditor.addEventListener('input', () => {
+    if (pendingSimplify) {
+      htmlEditor.value = pendingSimplify.html; // 精简确认弹窗打开期间禁止编辑
+      return;
+    }
     state.html = htmlEditor.value;
     scheduleCompute();
   });

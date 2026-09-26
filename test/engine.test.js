@@ -6,11 +6,13 @@ import {
   analyzeElement,
   compileRules,
   computeAllStyles,
+  countElements,
   decodeCharRefs,
   findByPath,
   matchesSelector,
   parseHtml,
   parseSelector,
+  simplifyRules,
 } from '../src/engine.js';
 
 let passed = 0;
@@ -350,6 +352,106 @@ test('规则校验：非法选择器、属性、值、层名进入 errors 且不
   assert.equal(compiled.length, 1);
   assert.equal(compiled[0].value, 'green');
   assert.deepEqual(errors.map((e) => e.index), [0, 1, 2, 3]);
+});
+
+/* ---------- 等价精简 ---------- */
+
+test('countElements：统计含隐式生成节点在内的全部元素', () => {
+  // <p>a<div>b</div></p> 浏览器树为 p、div、空 p 三个根元素
+  assert.equal(countElements(parseHtml('<p>a<div>b</div></p>').roots), 3);
+  const { roots } = parseHtml('<section><p class="a">1</p><p>2</p></section>');
+  assert.equal(countElements(roots), 3);
+});
+
+test('simplifyRules：删除完全重复的落败规则，保留序号字典序最小', () => {
+  // 规则 0 与 1 完全相同（无层、特异性相同、值相同），保留任一即可；
+  // 规则 2 是 .b 上的唯一胜出者，必须保留。最小保留数 2，取 [0, 2] 而非 [1, 2]。
+  const html = '<p class="a"></p><p class="b"></p>';
+  const rules = [
+    R('p', 'color', 'red'),
+    R('p', 'color', 'red'),
+    R('.b', 'color', 'blue'),
+  ];
+  const { roots } = parseHtml(html);
+  const r = simplifyRules(roots, rules);
+  assert.deepEqual(r.kept, [0, 2]);
+  assert.deepEqual(r.removed, [1]);
+});
+
+test('simplifyRules：只删从未胜出的规则会出错——不匹配的层锚点规则必须保留', () => {
+  // 规则 0 从不匹配任何元素，且自身从不胜出；但它建立了层 a（先于层 b）。
+  // "只删从未胜出规则"的做法会删掉 0：层顺序变为 [b]，p 的 color 随即翻转。
+  // 规则 2 虽在 p 上落败，却在 div 上唯一胜出而必须保留——规则 0 因此无法连带删除。
+  const html = '<p class="x"></p><div class="x"></div>';
+  const rules = [
+    R('section', 'color', 'anchor', { layer: 'a' }),
+    R('p.x', 'color', 'later', { layer: 'b' }),
+    R('.x', 'color', 'awin', { layer: 'a' }),
+  ];
+  const { roots } = parseHtml(html);
+  const r = simplifyRules(roots, rules);
+  assert.deepEqual(r.kept, [0, 1, 2]);
+  assert.deepEqual(r.removed, []);
+  assert.deepEqual(r.layerOrder, ['a', 'b']);
+
+  // 直接验证：删掉规则 0（保留 1、2）后层顺序变为 [b, a]，p 胜出值翻转
+  const { compiled, layerOrder } = compileRules([rules[1], rules[2]]);
+  assert.deepEqual(layerOrder, ['b', 'a']);
+  assert.equal(analyzeElement(roots[0], 'color', compiled)[0].value, 'awin');
+});
+
+test('simplifyRules：每个候选按剩余规则重算层名首次出现顺序', () => {
+  // 原集层顺序 [a, b]：p 的 color 为后层 b 的 in-b，规则 0、1 均落败。
+  // 最小解是只保留规则 2：此时层顺序重算为 [b]（不再有层间比较），值仍为 in-b。
+  // 若错误地沿用原层顺序 [a, b] 评估该候选，会得到"a 层后于 b → in-a 系列胜出"的假象。
+  const html = '<p></p>';
+  const rules = [
+    R('p', 'color', 'in-a-1', { layer: 'a' }),
+    R('p', 'color', 'in-a-2', { layer: 'a' }),
+    R('p', 'color', 'in-b', { layer: 'b' }),
+  ];
+  const { roots } = parseHtml(html);
+  const r = simplifyRules(roots, rules);
+  assert.deepEqual(r.kept, [2]);
+  assert.deepEqual(r.removed, [0, 1]);
+  assert.deepEqual(r.layerOrder, ['b']);
+  assert.deepEqual(r.originalLayerOrder, ['a', 'b']);
+});
+
+test('simplifyRules：无任何规则匹配元素时可全部删除（保持无声明语义）', () => {
+  const html = '<div><p>x</p></div>';
+  const rules = [R('span', 'color', 'red'), R('section', 'font-size', '10px')];
+  const { roots } = parseHtml(html);
+  const r = simplifyRules(roots, rules);
+  assert.deepEqual(r.kept, []);
+  assert.deepEqual(r.removed, [0, 1]);
+  assert.deepEqual(r.layerOrder, []);
+});
+
+test('simplifyRules：每条规则都是某元素某属性的唯一胜出者时全部保留', () => {
+  const html = '<div><p class="a">1</p><span class="b">2</span></div>';
+  const rules = [
+    R('p.a', 'color', 'red'),
+    R('span.b', 'color', 'blue'),
+    R('div', 'font-size', '16px'),
+  ];
+  const r = simplifyRules(parseHtml(html).roots, rules);
+  assert.deepEqual(r.kept, [0, 1, 2]);
+  assert.deepEqual(r.removed, []);
+});
+
+test('simplifyRules：important 场景下被完全压制的普通声明与落败层可删', () => {
+  const html = '<p></p>';
+  const rules = [
+    R('p', 'color', 'a-imp', { layer: 'a', important: true }),
+    R('p', 'color', 'b-imp', { layer: 'b', important: true }),
+    R('p', 'color', 'normal'),
+  ];
+  const { roots } = parseHtml(html);
+  const r = simplifyRules(roots, rules);
+  // important 先层 a 恒胜；删掉规则 1 后不再有层比较，规则 0 仍胜，规则 2 也可删
+  assert.deepEqual(r.kept, [0]);
+  assert.deepEqual(r.removed, [1, 2]);
 });
 
 console.log(`\n全部 ${passed} 项测试通过。`);

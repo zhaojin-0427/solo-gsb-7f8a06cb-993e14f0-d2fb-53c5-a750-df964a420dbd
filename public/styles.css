@@ -131,6 +131,11 @@ code {
   margin-top: 16px;
 }
 
+.rules-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .rules-list {
   display: flex;
   flex-direction: column;
@@ -386,4 +391,112 @@ button:hover { filter: brightness(1.08); }
   font-size: 13px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
   z-index: 99;
+}
+
+/* ---------- 等价精简 ---------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 28, 40, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 20px;
+}
+
+.modal-overlay[hidden] { display: none; }
+
+.modal {
+  background: var(--panel);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+  width: min(560px, 100%);
+  max-height: 85vh;
+  overflow-y: auto;
+  padding: 20px 22px;
+}
+
+.modal h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.modal-body {
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.simplify-summary {
+  background: var(--accent-soft);
+  border: 1px solid #c7d8f5;
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  color: var(--text);
+}
+
+.simplify-group {
+  margin-bottom: 10px;
+}
+
+.simplify-label {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.simplify-label.keep { color: var(--win); }
+.simplify-label.remove { color: var(--error); }
+
+.simplify-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rule-chip {
+  display: inline-block;
+  min-width: 26px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #eef1f6;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.modal-body .layer-chip {
+  display: inline-block;
+  font-family: var(--mono);
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 0 6px;
+  margin: 0 2px;
+}
+
+.muted { color: var(--muted); }
+
+.simplify-note {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.modal-actions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  filter: none;
 }

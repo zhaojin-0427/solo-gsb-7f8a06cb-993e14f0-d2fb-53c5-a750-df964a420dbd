@@ -4,11 +4,15 @@ import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ALLOWED_PROPS,
+  SIMPLIFY_MAX_ELEMENTS,
+  SIMPLIFY_MAX_RULES,
   analyzeElement,
   compileRules,
   computeAllStyles,
+  countElements,
   findByPath,
   parseHtml,
+  simplifyRules,
 } from './src/engine.js';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -117,6 +121,63 @@ async function handleAnalyze(req, res) {
   });
 }
 
+async function handleSimplify(req, res) {
+  const body = await readJson(req);
+  if (!Array.isArray(body.rules)) {
+    sendJson(res, 200, { ok: false, message: 'rules 必须是数组', htmlErrors: [], ruleErrors: [] });
+    return;
+  }
+  const html = typeof body.html === 'string' ? body.html : '';
+  const { roots, errors: htmlErrors } = parseHtml(html);
+  const { errors: ruleErrors, layerOrder: originalLayerOrder } = compileRules(body.rules);
+
+  if (htmlErrors.length || ruleErrors.length) {
+    sendJson(res, 200, {
+      ok: false,
+      htmlErrors,
+      ruleErrors,
+      layerOrder: originalLayerOrder,
+      message: 'HTML 或规则存在错误时不能进行等价精简，请先修正后再试。',
+    });
+    return;
+  }
+
+  const elementCount = countElements(roots);
+  const limitErrors = [];
+  if (elementCount > SIMPLIFY_MAX_ELEMENTS) {
+    limitErrors.push(`元素数量为 ${elementCount}，超过等价精简上限 ${SIMPLIFY_MAX_ELEMENTS} 个。`);
+  }
+  if (body.rules.length > SIMPLIFY_MAX_RULES) {
+    limitErrors.push(`规则数量为 ${body.rules.length}，超过等价精简上限 ${SIMPLIFY_MAX_RULES} 条。`);
+  }
+  if (limitErrors.length) {
+    sendJson(res, 200, {
+      ok: false,
+      htmlErrors: [],
+      ruleErrors: [],
+      layerOrder: originalLayerOrder,
+      limitErrors,
+      elementCount,
+      ruleCount: body.rules.length,
+    });
+    return;
+  }
+
+  const result = simplifyRules(roots, body.rules);
+  sendJson(res, 200, {
+    ok: true,
+    htmlErrors: [],
+    ruleErrors: [],
+    layerOrder: result.layerOrder,
+    originalLayerOrder: result.originalLayerOrder,
+    kept: result.kept,
+    removed: result.removed,
+    elementCount,
+    ruleCount: body.rules.length,
+    examinedCandidates: result.examinedCandidates,
+  });
+}
+
 async function handleExamples(res) {
   let files = [];
   try {
@@ -165,6 +226,7 @@ const server = http.createServer(async (req, res) => {
     const { pathname } = new URL(req.url, 'http://localhost');
     if (req.method === 'POST' && pathname === '/api/compute') return await handleCompute(req, res);
     if (req.method === 'POST' && pathname === '/api/analyze') return await handleAnalyze(req, res);
+    if (req.method === 'POST' && pathname === '/api/simplify') return await handleSimplify(req, res);
     if (req.method === 'GET' && pathname === '/api/examples') return await handleExamples(res);
     if (req.method === 'GET') return await serveStatic(req, res, pathname);
     sendJson(res, 405, { error: 'Method Not Allowed' });

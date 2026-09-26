@@ -16,6 +16,9 @@
  *      4. 层顺序按层名在规则列表中首次出现的位置确定；
  *      5. 同层（同重要级）依次比较 ID、类、类型选择器数量，再比较规则先后顺序（后者优先）；
  *      6. 不计继承与浏览器默认样式。
+ *  - 等价精简（simplifyRules）：穷举原序规则子序列（≤10 条规则），每个候选重新编译
+ *    （层名首次出现顺序随之重算）并核对全树三属性胜出值（含无声明），取保留条数最少、
+ *    保留原序号序列字典序最小者。
  */
 
 export const ALLOWED_TAGS = ['div', 'section', 'p', 'span'];
@@ -606,4 +609,117 @@ export function computeAllStyles(roots, compiled) {
   };
   roots.forEach(walk);
   return styles;
+}
+
+/* ------------------------------------------------------------------ */
+/* 等价精简                                                             */
+/* ------------------------------------------------------------------ */
+
+/** 等价精简的规模上限：元素数与合法规则数。 */
+export const SIMPLIFY_MAX_ELEMENTS = 40;
+export const SIMPLIFY_MAX_RULES = 10;
+
+/** 统计元素树中的元素节点总数（含浏览器式解析隐式生成的节点）。 */
+export function countElements(roots) {
+  let n = 0;
+  const walk = (node) => {
+    n += 1;
+    node.children.forEach(walk);
+  };
+  roots.forEach(walk);
+  return n;
+}
+
+/**
+ * 收集全树每个元素在三个属性上的胜出值（无胜出声明记为 null）。
+ * 元素树固定时遍历顺序一致，两个规则集可按位置逐一比较，
+ * 因此"无声明"情形也会参与等价判定。
+ */
+function collectWinners(roots, compiled) {
+  const values = [];
+  const walk = (node) => {
+    for (const prop of ALLOWED_PROPS) {
+      const result = analyzeElement(node, prop, compiled);
+      values.push(result.length ? result[0].value : null);
+    }
+    node.children.forEach(walk);
+  };
+  roots.forEach(walk);
+  return values;
+}
+
+function winnersEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+/** 保留原序号序列的字典序比较：a < b 时返回 true。 */
+function lexSmaller(a, b) {
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    if (a[i] !== b[i]) return a[i] < b[i];
+  }
+  return a.length < b.length;
+}
+
+/**
+ * 等价精简：在合法规则序列中找出保留条数最少的原序子序列，使全树每个元素
+ * color / background-color / font-size 的胜出值（含无声明）与原规则集完全相同；
+ * 多个最优解取保留原序号序列字典序最小者。
+ *
+ * 每种候选都用 compileRules 重新编译剩余规则——层名首次出现顺序随之重算，
+ * 再重算层叠结果。因此"自身从不胜出、仅用于占位层顺序"的规则也会被保留，
+ * 不能简单地只删除从未胜出的规则。
+ *
+ * 前置条件：HTML 与规则均已校验合法，且规则数 ≤ SIMPLIFY_MAX_RULES。
+ * 返回 { kept, removed, layerOrder, originalLayerOrder, examinedCandidates }，
+ * 序号均为原规则列表中的 0 基下标。
+ */
+export function simplifyRules(roots, rules) {
+  const list = Array.isArray(rules) ? rules : [];
+  const n = list.length;
+  const full = compileRules(list);
+  const target = collectWinners(roots, full.compiled);
+
+  let best = null;
+  let bestLayerOrder = full.layerOrder;
+  let examined = 0;
+
+  // 位掩码枚举全部 2^n 个原序子序列（位 i 为 1 表示保留第 i 条规则）
+  const totalMasks = 1 << n;
+  for (let mask = 0; mask < totalMasks; mask++) {
+    const kept = [];
+    for (let i = 0; i < n; i++) {
+      if (mask & (1 << i)) kept.push(i);
+    }
+    if (best && kept.length > best.length) continue; // 只可能更差，无需重算
+    examined++;
+
+    // 关键：按剩余规则重新编译，层名首次出现顺序重新确定
+    const subset = kept.map((i) => list[i]);
+    const { compiled, layerOrder } = compileRules(subset);
+    if (!winnersEqual(target, collectWinners(roots, compiled))) continue;
+
+    if (!best || kept.length < best.length
+      || (kept.length === best.length && lexSmaller(kept, best))) {
+      best = kept;
+      bestLayerOrder = layerOrder;
+    }
+  }
+
+  const keptSet = new Set(best);
+  const removed = [];
+  for (let i = 0; i < n; i++) {
+    if (!keptSet.has(i)) removed.push(i);
+  }
+  return {
+    kept: best,
+    removed,
+    layerOrder: bestLayerOrder,
+    originalLayerOrder: full.layerOrder,
+    examinedCandidates: examined,
+  };
 }
