@@ -13,6 +13,11 @@ const selectedInfoBox = $('#selectedInfo');
 const exampleSelect = $('#exampleSelect');
 const loadExampleBtn = $('#loadExampleBtn');
 const previewHost = $('#previewHost');
+const simplifyBtn = $('#simplifyBtn');
+const simplifyModal = $('#simplifyModal');
+const simplifyModalBody = $('#simplifyModalBody');
+const simplifyCancelBtn = $('#simplifyCancelBtn');
+const simplifyConfirmBtn = $('#simplifyConfirmBtn');
 const toast = $('#toast');
 
 const shadow = previewHost.attachShadow({ mode: 'open' });
@@ -397,6 +402,148 @@ async function analyze() {
   if (seq !== analyzeSeq) return;
   renderAnalysis(data);
 }
+
+/* ---------------- 等价精简 ---------------- */
+
+let simplifyResult = null;
+
+function idxListHtml(indices, cls) {
+  if (!indices.length) return '<span class="simp-none">无</span>';
+  return indices.map((i) => `<span class="idx-chip ${cls}">#${i + 1}</span>`).join('');
+}
+
+function layerChips(order) {
+  if (!order?.length) return '<span class="simp-none">无有层规则（均为无层声明）</span>';
+  return order.map((l) => `<span class="layer-chip">${escapeHtml(l)}</span>`).join(' → ');
+}
+
+function ruleSummary(i) {
+  const r = state.rules[i];
+  if (!r) return '';
+  const imp = r.important ? ' <span class="badge important">!important</span>' : '';
+  const layer = r.layer
+    ? `<span class="badge layer">层「${escapeHtml(r.layer)}」</span>`
+    : '<span class="badge nolayer">无层</span>';
+  return `<code>${escapeHtml(r.selector)}</code> <span class="arrow">→</span>
+    <code>${escapeHtml(r.property)}: ${escapeHtml(r.value)}</code> ${layer}${imp}`;
+}
+
+function openSimplifyModal() {
+  simplifyModal.hidden = false;
+}
+
+function closeSimplifyModal() {
+  simplifyModal.hidden = true;
+  simplifyResult = null;
+}
+
+function renderSimplifyError(data) {
+  simplifyConfirmBtn.hidden = true;
+  simplifyCancelBtn.textContent = '知道了';
+  const htmlErrors = (data.htmlErrors || []).map((m) => `<div>${escapeHtml(m)}</div>`).join('');
+  const ruleErrors = (data.ruleErrors || [])
+    .map((e) => e.messages.map((m) => `<div>规则 #${e.index + 1}：${escapeHtml(m)}</div>`).join(''))
+    .join('');
+  simplifyModalBody.innerHTML = `
+    <div class="simp-error-title">无法进行等价精简（输入未被改动）</div>
+    <div class="simp-error-msg">${escapeHtml(data.message || 'HTML 或规则不合法 / 超过规模上限。')}</div>
+    ${htmlErrors ? `<div class="simp-error-list"><strong>HTML 错误：</strong>${htmlErrors}</div>` : ''}
+    ${ruleErrors ? `<div class="simp-error-list"><strong>规则错误：</strong>${ruleErrors}</div>` : ''}`;
+  openSimplifyModal();
+}
+
+function renderSimplifyResult(data) {
+  simplifyResult = data;
+  simplifyConfirmBtn.hidden = false;
+  simplifyCancelBtn.textContent = '取消';
+
+  const removedRows = data.removed.map((i) => `
+    <li class="simp-rule removed">${idxListHtml([i], 'del')} ${ruleSummary(i)}</li>`).join('');
+  const keptRows = data.kept.map((i) => `
+    <li class="simp-rule kept">${idxListHtml([i], 'keep')} ${ruleSummary(i)}</li>`).join('');
+
+  const layerChanged = JSON.stringify(data.originalLayerOrder) !== JSON.stringify(data.layerOrder);
+  simplifyModalBody.innerHTML = `
+    <p class="simp-summary">
+      在 <strong>${data.ruleCount}</strong> 条原规则中保留
+      <strong>${data.kept.length}</strong> 条、删除
+      <strong>${data.removed.length}</strong> 条，即可保证全部
+      ${data.elementCount} 个元素的 <code>color</code> /
+      <code>background-color</code> / <code>font-size</code>
+      胜出值（包括无声明）与原规则集完全一致。
+    </p>
+    <div class="simp-cols">
+      <div class="simp-col">
+        <div class="simp-col-title">保留的原规则序号</div>
+        <div class="simp-idx-row">${idxListHtml(data.kept, 'keep')}</div>
+      </div>
+      <div class="simp-col">
+        <div class="simp-col-title">删除的原规则序号</div>
+        <div class="simp-idx-row">${idxListHtml(data.removed, 'del')}</div>
+      </div>
+    </div>
+    <div class="simp-layers">
+      <div><span class="simp-col-title">原层顺序：</span>${layerChips(data.originalLayerOrder)}</div>
+      <div><span class="simp-col-title">新层顺序：</span>${layerChips(data.layerOrder)}
+        ${layerChanged ? '<span class="simp-note">（按保留规则的层名首次出现重新计算）</span>' : '<span class="simp-note">（未变化）</span>'}</div>
+    </div>
+    <details class="simp-details">
+      <summary>查看每条规则的去留</summary>
+      <div class="simp-rule-list">
+        <div class="simp-col-title">删除</div>
+        ${removedRows || '<div class="simp-none">无删除规则</div>'}
+        <div class="simp-col-title">保留</div>
+        ${keptRows || '<div class="simp-none">无保留规则（全部声明均可删除）</div>'}
+      </div>
+    </details>
+    <p class="simp-warn">确认后才会替换编辑区规则；取消则不做任何改动。</p>`;
+  openSimplifyModal();
+}
+
+simplifyBtn.addEventListener('click', async () => {
+  simplifyBtn.disabled = true;
+  let data;
+  try {
+    data = await postJson('/api/simplify', { html: state.html, rules: state.rules });
+  } catch (err) {
+    renderSimplifyError({ message: `请求失败：${err.message}` });
+    simplifyBtn.disabled = false;
+    return;
+  }
+  simplifyBtn.disabled = false;
+  if (!data.ok) {
+    renderSimplifyError(data);
+    return;
+  }
+  // 记录请求时刻的规则快照，确认时核对，避免序号与编辑区错配
+  data.rulesSnapshot = state.rules.slice();
+  renderSimplifyResult(data);
+});
+
+simplifyConfirmBtn.addEventListener('click', () => {
+  if (!simplifyResult) return;
+  if (state.rules.length !== simplifyResult.ruleCount
+      || state.rules.some((r, i) => r !== simplifyResult.rulesSnapshot[i])) {
+    showToast('规则在精简计算后已被修改，请重新执行等价精简');
+    closeSimplifyModal();
+    return;
+  }
+  const keptSet = new Set(simplifyResult.kept);
+  state.rules = state.rules.filter((_, i) => keptSet.has(i));
+  renderRules();
+  renderRuleErrors([]);
+  closeSimplifyModal();
+  showToast('规则已按等价精简结果替换');
+  compute();
+});
+
+simplifyCancelBtn.addEventListener('click', closeSimplifyModal);
+simplifyModal.addEventListener('click', (e) => {
+  if (e.target === simplifyModal) closeSimplifyModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !simplifyModal.hidden) closeSimplifyModal();
+});
 
 /* ---------------- 示例 ---------------- */
 

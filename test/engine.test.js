@@ -6,11 +6,13 @@ import {
   analyzeElement,
   compileRules,
   computeAllStyles,
+  countElements,
   decodeCharRefs,
   findByPath,
   matchesSelector,
   parseHtml,
   parseSelector,
+  simplifyRules,
 } from '../src/engine.js';
 
 let passed = 0;
@@ -350,6 +352,162 @@ test('规则校验：非法选择器、属性、值、层名进入 errors 且不
   assert.equal(compiled.length, 1);
   assert.equal(compiled[0].value, 'green');
   assert.deepEqual(errors.map((e) => e.index), [0, 1, 2, 3]);
+});
+
+/* ---------- 等价精简 ---------- */
+
+function simplify(html, rules) {
+  const { roots, errors } = parseHtml(html);
+  assert.deepEqual(errors, []);
+  return simplifyRules(roots, rules);
+}
+
+/** 精简结果必须真的与原规则集层叠结果完全一致（含无声明状态）。 */
+function assertEquivalent(html, rules, kept) {
+  const { roots } = parseHtml(html);
+  const before = compileRules(rules);
+  const after = compileRules(kept.map((i) => rules[i]));
+  assert.deepEqual(after.layerOrder, simplify(html, rules).layerOrder);
+  const walk = (node) => {
+    for (const prop of ['color', 'background-color', 'font-size']) {
+      const b = analyzeElement(node, prop, before.compiled)[0]?.value ?? null;
+      const a = analyzeElement(node, prop, after.compiled)[0]?.value ?? null;
+      assert.equal(a, b, `元素 ${node.path} 的 ${prop} 精简后由 ${b} 变为 ${a}`);
+    }
+    node.children.forEach((c) => walk(c));
+  };
+  roots.forEach(walk);
+}
+
+test('countElements：统计全树元素数', () => {
+  assert.equal(countElements(parseHtml('<div><p>a</p><p>b<span></span></p></div>').roots), 4);
+  assert.equal(countElements(parseHtml('').roots), 0);
+  assert.equal(countElements(parseHtml('<p>a<div>b</div></p>').roots), 3);
+});
+
+test('等价精简：删除全部声明也不改变胜出值（无匹配规则）→ 空集', () => {
+  const html = '<div><p>x</p></div>';
+  const rules = [R('span', 'color', 'red'), R('div span', 'font-size', '16px', { layer: 'a' })];
+  const r = simplify(html, rules);
+  assert.deepEqual(r.kept, []);
+  assert.deepEqual(r.removed, [0, 1]);
+  assert.deepEqual(r.layerOrder, []);
+  assertEquivalent(html, rules, r.kept);
+});
+
+test('等价精简：空规则集 → 保留空集', () => {
+  const r = simplify('<p></p>', []);
+  assert.deepEqual(r.kept, []);
+  assert.deepEqual(r.removed, []);
+  assert.deepEqual(r.layerOrder, []);
+});
+
+test('等价精简：落败且无处胜出的规则可删；胜出规则必须保留', () => {
+  const html = '<p class="a"></p>';
+  const rules = [
+    R('p', 'color', 'red'),                          // 0 胜出（无层）
+    R('p', 'color', 'blue', { layer: 'x' }),         // 1 落败（有层低于无层）
+    R('p', 'font-size', '14px', { layer: 'y' }),     // 2 在 font-size 胜出
+  ];
+  const r = simplify(html, rules);
+  assert.deepEqual(r.kept, [0, 2]);
+  assert.deepEqual(r.removed, [1]);
+  // 删除规则 1 后层 y 成为（也是唯一的）层；新层顺序由剩余规则重算
+  assert.deepEqual(r.originalLayerOrder, ['x', 'y']);
+  assert.deepEqual(r.layerOrder, ['y']);
+  assertEquivalent(html, rules, r.kept);
+});
+
+test('等价精简：同值替代时取保留原序号字典序最小者', () => {
+  const html = '<p></p>';
+  // 两条无层、同特异性、同值声明：任一胜出都给出 red
+  const rules = [
+    R('p', 'color', 'red'),  // 0
+    R('p', 'color', 'red'),  // 1
+  ];
+  const r = simplify(html, rules);
+  assert.deepEqual(r.kept, [0]);
+  assert.deepEqual(r.removed, [1]);
+  assertEquivalent(html, rules, r.kept);
+
+  // 规则 0 选择器不匹配任何元素，规则 1 才是唯一赢家
+  const rules2 = [
+    R('span', 'color', 'red'),  // 0 不匹配
+    R('p', 'color', 'red'),     // 1 胜出
+  ];
+  const r2 = simplify(html, rules2);
+  assert.deepEqual(r2.kept, [1]);
+  assertEquivalent(html, rules2, r2.kept);
+});
+
+test('等价精简：层叠替换场景——删掉胜出者后由落败者顶替且值必须相同', () => {
+  const html = '<p class="a"></p>';
+  // 0：无层 red 胜出；1：有层 red 落败。删除 0 后 1 顶替，胜出值仍为 red
+  const rules = [
+    R('p', 'color', 'red'),
+    R('p', 'color', 'red', { layer: 'L' }),
+    R('p', 'color', 'blue', { layer: 'L' }),
+  ];
+  const r = simplify(html, rules);
+  assert.deepEqual(r.kept, [0]);
+  assert.deepEqual(r.removed, [1, 2]);
+  // 仅保留无层规则时层顺序为空，确属按剩余规则重新计算
+  assert.deepEqual(r.layerOrder, []);
+  assertEquivalent(html, rules, r.kept);
+
+  // 顶替者值不同：胜出规则不可删除（但 blue 落败规则本身仍可删，仅留 0 即等价）
+  const rulesBad = [
+    R('p', 'color', 'red'),
+    R('p', 'color', 'blue', { layer: 'L' }),
+  ];
+  const rb = simplify(html, rulesBad);
+  assert.deepEqual(rb.kept, [0]);
+  assert.deepEqual(rb.removed, [1]);
+});
+
+test('等价精简：无声明状态必须保持（删掉唯一规则会使有值元素变为无声明）', () => {
+  const html = '<div><p>x</p></div>';
+  // p 的 color 有值；div 的三个属性全无声明
+  const rules = [R('p', 'color', 'red')];
+  const r = simplify(html, rules);
+  assert.deepEqual(r.kept, [0]);
+  assertEquivalent(html, rules, r.kept);
+  // 空候选下 p.color 变为 null，与原结果不同，故不可全删
+  const { roots } = parseHtml(html);
+  assert.equal(computeAllStyles(roots, compileRules([]).compiled)['0.0'], undefined);
+  assert.equal(computeAllStyles(roots, compileRules(rules).compiled)['0.0'].color, 'red');
+});
+
+test('等价精简：每个候选独立重算层顺序，不依赖"曾胜出"标记', () => {
+  const html = '<p class="a"></p>';
+  const rules = [
+    R('span', 'color', 'red', { layer: 'b' }),  // 0：无任何元素匹配，仅决定层 b 先出现
+    R('.a', 'color', 'red', { layer: 'a' }),    // 1：层 a 后出现且特异性高，red 胜出
+    R('p', 'color', 'blue', { layer: 'a' }),    // 2：同层 a 但特异性低，落败
+  ];
+  // 原层顺序 [b, a]；删除 0、2 后只剩规则 1，层顺序按剩余规则重算为 [a]，red 仍胜
+  const r = simplify(html, rules);
+  assert.deepEqual(r.originalLayerOrder, ['b', 'a']);
+  assert.deepEqual(r.kept, [1]);
+  assert.deepEqual(r.removed, [0, 2]);
+  assert.deepEqual(r.layerOrder, ['a']);
+  // 不能只保留 2：blue 会顶替胜出
+  assertEquivalent(html, rules, r.kept);
+});
+
+test('等价精简：结果为最小值（任何真子集都不再等价）', () => {
+  const html = '<section><p class="a">1</p><p>2</p></section>';
+  const rules = [
+    R('p', 'color', 'red'),
+    R('.a', 'color', 'green'),
+    R('section p', 'font-size', '14px'),
+    R('p', 'color', 'red'),    // 与 0 同值同特异性重复（靠后者胜，但值相同）
+    R('span', 'color', 'red'), // 不匹配
+  ];
+  const r = simplify(html, rules);
+  // 0/3 二选一（字典序取 0）；1、2 各自唯一负责；4 可删
+  assert.deepEqual(r.kept, [0, 1, 2]);
+  assertEquivalent(html, rules, r.kept);
 });
 
 console.log(`\n全部 ${passed} 项测试通过。`);

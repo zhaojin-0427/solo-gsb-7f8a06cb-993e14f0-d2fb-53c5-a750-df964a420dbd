@@ -1,6 +1,6 @@
 # CSS 层叠判定工作台
 
-本地运行的 CSS 层叠（Cascade）判定学习与调试工具：编辑受限 HTML，添加带选择器 / 属性值 / 层名 / `!important` 标记的规则，点击预览中的元素并选择属性，即可查看**全部匹配声明、胜出值以及每条落败声明的具体落败原因**。
+本地运行的 CSS 层叠（Cascade）判定学习与调试工具：编辑受限 HTML，添加带选择器 / 属性值 / 层名 / `!important` 标记的规则，点击预览中的元素并选择属性，即可查看**全部匹配声明、胜出值以及每条落败声明的具体落败原因**；还可使用「等价精简」找出与原规则集层叠结果完全等价的最短原序规则子序列。
 
 - 后端：Node.js 原生 `http`，**零第三方依赖**
 - 前端：原生 HTML / CSS / JavaScript（预览使用 Shadow DOM 隔离）
@@ -66,6 +66,16 @@ npm start
 
 顶部下拉框可一键载入 3 个内置示例。
 
+### 4. 等价精简
+
+点击规则区右上角的「✂ 等价精简」，在**不改变任何元素 `color` / `background-color` / `font-size` 胜出值（包括"无任何匹配声明"的状态）**的前提下，从原规则集中找出**保留条数最少的原序子序列**：
+
+- 适用规模：合法 HTML 中**至多 40 个元素**、**至多 10 条合法规则**；HTML 或规则报错、超过规模上限时会说明原因，且**不改动输入**。
+- 算法穷举全部 2^n 个原序子序列（n ≤ 10，最多 1024 个候选），**每个候选都按剩余规则重新编译**：层名首次出现顺序按保留规则重排，再重新计算全树层叠结果，绝不复用原编译结果，也不是简单删除"从未胜出"的规则（删除规则可能改变层集合与顶替关系）。
+- 若存在多个保留条数相同的最优解，取**保留原序号序列字典序最小**的一个。
+- 结果以弹窗展示：保留、删除的**原规则序号**（#n 从 1 开始），原层顺序与按保留规则重算的**新层顺序**，以及每条规则的去留明细。
+- 只有点击「确认替换」后才会用保留规则替换编辑区；点「取消」/ 遮罩 / 按 Esc 均不改动。
+
 ## 层叠判定规则（本工具实现）
 
 1. `!important` 声明优先于普通声明。
@@ -93,6 +103,7 @@ npm start
 | --- | --- | --- |
 | `/api/compute` | POST | 入参 `{ html, rules }`；返回校验错误、层顺序与全树胜出值（供预览渲染） |
 | `/api/analyze` | POST | 入参 `{ html, rules, path, property }`；返回该元素该属性的匹配声明（按优先级排序，含落败原因） |
+| `/api/simplify` | POST | 入参 `{ html, rules }`；返回与原规则集三属性胜出值完全等价的最短原序规则子序列（仅接受合法 HTML ≤40 元素、合法规则 ≤10 条） |
 | `/api/examples` | GET | 返回内置示例列表 |
 
 `path` 为元素下标路径（根元素 `0`，其第二个子元素 `0.1`，以此类推）。
@@ -101,6 +112,15 @@ npm start
 curl -s -X POST http://localhost:3000/api/analyze \
   -H 'Content-Type: application/json' \
   -d '{"html":"<div><p class=\"a\">x</p></div>","rules":[{"selector":"p","property":"color","value":"red","layer":"","important":false}],"path":"0.0","property":"color"}'
+```
+
+`/api/simplify` 成功时返回 `ok: true` 与 `kept` / `removed`（保留 / 删除的原规则下标，0 基，按下标升序）、`layerOrder`（按保留规则重算的新层顺序）、`originalLayerOrder`、`elementCount`、`ruleCount`；HTML / 规则非法或超过 40 元素 / 10 规则上限时返回 `ok: false` 与中文 `message`（附带 `htmlErrors` / `ruleErrors`），不修改任何输入：
+
+```bash
+curl -s -X POST http://localhost:3000/api/simplify \
+  -H 'Content-Type: application/json' \
+  -d '{"html":"<p class=\"a\">x</p>","rules":[{"selector":"span","property":"color","value":"red","layer":"b","important":false},{"selector":".a","property":"color","value":"red","layer":"a","important":false}]}'
+# {"ok":true,...,"kept":[1],"removed":[0],"layerOrder":["a"],"originalLayerOrder":["b","a"],...}
 ```
 
 ## 目录结构
@@ -138,3 +158,4 @@ PORT=8080 npm start
 - 不解析 `<style>`、注释、DOCTYPE；HTML 中只允许规定的 4 个标签与 2 个属性。
 - 命名字符引用覆盖常用子集（Latin-1 全集与 `&amp;` `&lt;` `&gt;` `&quot;` `&apos;` `&nbsp;` 等）；数字引用（十进制 / 十六进制）完整支持。未收录的引用名与浏览器对未知引用的处理一致：原样保留。
 - `em` 等相对单位在浏览器预览中的渲染遵循浏览器自身规则；判定面板以声明值为准，不做单位换算。
+- 「等价精简」以声明值的**字符串相等**判定胜出值一致（如 `red` 与 `#f00` 视为不同），且仅保证三个判定属性的全树胜出值（含无声明）不变；为保证穷举可完成，仅接受 ≤40 元素、≤10 条合法规则。

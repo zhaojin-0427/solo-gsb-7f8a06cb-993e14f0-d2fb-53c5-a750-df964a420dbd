@@ -607,3 +607,117 @@ export function computeAllStyles(roots, compiled) {
   roots.forEach(walk);
   return styles;
 }
+
+/* ------------------------------------------------------------------ */
+/* 等价精简                                                             */
+/* ------------------------------------------------------------------ */
+
+/** 等价精简允许的最大元素数与最大合法规则数。 */
+export const SIMPLIFY_MAX_ELEMENTS = 40;
+export const SIMPLIFY_MAX_RULES = 10;
+
+/** 统计元素树中的元素总数。 */
+export function countElements(roots) {
+  let count = 0;
+  const walk = (node) => {
+    count++;
+    node.children.forEach(walk);
+  };
+  roots.forEach(walk);
+  return count;
+}
+
+/**
+ * 计算全树每个元素在三个属性上的"胜出值签名"：
+ * Map<"path property", value | null>，null 表示无任何匹配声明。
+ * 把"无声明"也纳入签名，保证精简后连缺失状态都必须一致。
+ */
+function cascadeSignature(roots, compiled) {
+  const sig = new Map();
+  const walk = (node) => {
+    for (const prop of ALLOWED_PROPS) {
+      const matched = analyzeElement(node, prop, compiled);
+      sig.set(`${node.path} ${prop}`, matched.length ? matched[0].value : null);
+    }
+    node.children.forEach(walk);
+  };
+  roots.forEach(walk);
+  return sig;
+}
+
+function sameSignature(a, b) {
+  if (a.size !== b.size) return false;
+  for (const [key, value] of a) {
+    if (b.get(key) !== value) return false;
+  }
+  return true;
+}
+
+/** 原序号序列的字典序比较（长度相同时使用）。 */
+function lexicallyLess(a, b) {
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    if (a[i] !== b[i]) return a[i] < b[i];
+  }
+  return a.length < b.length;
+}
+
+/**
+ * 等价精简：在全部合法的规则序列中，找出保留条数最少的原序子序列，
+ * 使全树每个元素的 color / background-color / font-size 胜出值
+ * （包括无任何匹配声明的状态）与原规则集完全相同；
+ * 若有多个最优解，取保留原序号序列字典序最小的一个。
+ *
+ * 每个候选都按剩余规则重新 compileRules —— 层名首次出现顺序随剩余规则
+ * 重排（层只是从顺序表中删除，存活层相对次序不变，但层集合本身变化），
+ * 绝不复用原编译结果，也不按"某条规则是否曾胜出于某处"做局部删除。
+ *
+ * 调用方须先保证 HTML 无解析错误、规则全部合法且数量 ≤ SIMPLIFY_MAX_RULES。
+ *
+ * 返回 { kept, removed, layerOrder, originalLayerOrder }：
+ *  - kept / removed：保留 / 删除的原规则下标（0 基），kept 按下标升序；
+ *  - layerOrder：精简后按保留规则首次出现重算的层顺序；
+ *  - originalLayerOrder：原规则集的层顺序。
+ */
+export function simplifyRules(roots, rules) {
+  const list = Array.isArray(rules) ? rules : [];
+  const n = list.length;
+
+  const full = compileRules(list);
+  const target = cascadeSignature(roots, full.compiled);
+
+  let best = null;
+  let bestLayerOrder = full.layerOrder;
+
+  // 穷举全部 2^n 个原序子序列（含空集）。n ≤ 10，候选至多 1024 个。
+  for (let mask = 0; mask < (1 << n); mask++) {
+    const kept = [];
+    for (let i = 0; i < n; i++) {
+      if (mask & (1 << i)) kept.push(i);
+    }
+    if (best !== null && kept.length > best.length) continue;
+
+    // 关键：按剩余规则重新编译，层名首次出现顺序与规则先后均重新计算
+    const candidate = compileRules(kept.map((i) => list[i]));
+    if (!sameSignature(cascadeSignature(roots, candidate.compiled), target)) continue;
+
+    if (best === null || kept.length < best.length
+      || (kept.length === best.length && lexicallyLess(kept, best))) {
+      best = kept;
+      bestLayerOrder = candidate.layerOrder;
+    }
+  }
+
+  // 全量候选必然与目标签名相同，因此 n ≥ 0 时 best 一定非 null
+  const keptSet = new Set(best);
+  const removed = [];
+  for (let i = 0; i < n; i++) {
+    if (!keptSet.has(i)) removed.push(i);
+  }
+  return {
+    kept: best,
+    removed,
+    layerOrder: bestLayerOrder,
+    originalLayerOrder: full.layerOrder,
+  };
+}

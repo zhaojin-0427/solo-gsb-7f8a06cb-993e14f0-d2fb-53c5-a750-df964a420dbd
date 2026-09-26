@@ -4,11 +4,15 @@ import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ALLOWED_PROPS,
+  SIMPLIFY_MAX_ELEMENTS,
+  SIMPLIFY_MAX_RULES,
   analyzeElement,
   compileRules,
   computeAllStyles,
+  countElements,
   findByPath,
   parseHtml,
+  simplifyRules,
 } from './src/engine.js';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -117,6 +121,66 @@ async function handleAnalyze(req, res) {
   });
 }
 
+async function handleSimplify(req, res) {
+  const body = await readJson(req);
+  const rules = Array.isArray(body.rules) ? body.rules : null;
+
+  if (!rules) {
+    sendJson(res, 200, { ok: false, message: '规则字段必须是数组，无法进行等价精简。' });
+    return;
+  }
+  if (rules.length > SIMPLIFY_MAX_RULES) {
+    sendJson(res, 200, {
+      ok: false,
+      message: `等价精简仅支持至多 ${SIMPLIFY_MAX_RULES} 条规则，当前有 ${rules.length} 条；规模超限，未做任何改动。`,
+    });
+    return;
+  }
+
+  const html = typeof body.html === 'string' ? body.html : '';
+  const { roots, errors: htmlErrors } = parseHtml(html);
+  const { errors: ruleErrors, layerOrder: originalLayerOrder } = compileRules(rules);
+
+  const problems = [];
+  if (htmlErrors.length) problems.push('HTML 存在解析错误，请先修正后再精简');
+  if (ruleErrors.length) problems.push(`有 ${ruleErrors.length} 条规则不合法，请先修正行内报错后再精简`);
+  if (problems.length) {
+    sendJson(res, 200, {
+      ok: false,
+      htmlErrors,
+      ruleErrors,
+      layerOrder: originalLayerOrder,
+      message: `${problems.join('；')}；输入未被改动。`,
+    });
+    return;
+  }
+
+  const elementCount = countElements(roots);
+  if (elementCount > SIMPLIFY_MAX_ELEMENTS) {
+    sendJson(res, 200, {
+      ok: false,
+      htmlErrors,
+      ruleErrors,
+      layerOrder: originalLayerOrder,
+      message: `等价精简仅支持至多 ${SIMPLIFY_MAX_ELEMENTS} 个元素，当前 HTML 有 ${elementCount} 个元素；规模超限，未做任何改动。`,
+    });
+    return;
+  }
+
+  const result = simplifyRules(roots, rules);
+  sendJson(res, 200, {
+    ok: true,
+    htmlErrors,
+    ruleErrors,
+    kept: result.kept,
+    removed: result.removed,
+    layerOrder: result.layerOrder,
+    originalLayerOrder: result.originalLayerOrder,
+    elementCount,
+    ruleCount: rules.length,
+  });
+}
+
 async function handleExamples(res) {
   let files = [];
   try {
@@ -165,6 +229,7 @@ const server = http.createServer(async (req, res) => {
     const { pathname } = new URL(req.url, 'http://localhost');
     if (req.method === 'POST' && pathname === '/api/compute') return await handleCompute(req, res);
     if (req.method === 'POST' && pathname === '/api/analyze') return await handleAnalyze(req, res);
+    if (req.method === 'POST' && pathname === '/api/simplify') return await handleSimplify(req, res);
     if (req.method === 'GET' && pathname === '/api/examples') return await handleExamples(res);
     if (req.method === 'GET') return await serveStatic(req, res, pathname);
     sendJson(res, 405, { error: 'Method Not Allowed' });
